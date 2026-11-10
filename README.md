@@ -1,112 +1,56 @@
-# 还我推流权 - 解除B站5000粉的第三方开播限制
+# 还我推流权 · Bilibili Stream Unlocker
 
-## 📢 项目说明
+用于 B 站网页直播中心的 Chrome 扩展，恢复第三方软件开播入口，并适配推流地址获取和开播接口。
 
-本项目 Fork 自 [ProgramRipper/BLiveWeb](https://github.com/ProgramRipper/BLiveWeb)，原项目采用篡改猴（Tampermonkey）脚本形式运行。
+本分支由 LanRaw 维护，基于 [George-Bai-VDS 的 Chrome 扩展](https://github.com/George-Bai-VDS/Bilibili-Stream-Unlocker)，移植 [ProgramRipper/BLiveWeb 的接口兼容方案](https://github.com/ProgramRipper/BLiveWeb/blob/eaa6433945ebc20dae3a2443b167ea37fdfeb99d/src/index.user.ts)。当前版本为 **1.1.0**。
 
-由于篡改猴脚本的权限限制，在某些情况下拦截效果不够理想，因此我将其重构为 Chrome 浏览器扩展程序。**浏览器扩展拥有更高的权限级别**，能够：
+## 下载与安装
 
-- ✅ 更深层次地拦截和修改网络请求
-- ✅ 完全控制页面的 JavaScript 环境
-- ✅ 修改响应数据，绕过权限检查
-- ✅ 大幅提升修改成功率
+- [下载 1.1.0 完整安装包](https://github.com/LanRaw/Bilibili-Stream-Unlocker/releases/download/v1.1.0/bilibili-live-extension-v1.1.0.zip)
+- [查看所有发布版本](https://github.com/LanRaw/Bilibili-Stream-Unlocker/releases)
+- [仓库内的同版 ZIP 备份](https://github.com/LanRaw/Bilibili-Stream-Unlocker/raw/refs/heads/master/dist/bilibili-live-extension-v1.1.0.zip)
 
-## 🚫 关于B站的限制
+1. 下载 ZIP，解压到一个固定保留的文件夹；该文件夹根目录应包含 `manifest.json`。
+2. 打开 `chrome://extensions/`，启用右上角的「开发者模式」。
+3. 点击「加载已解压的扩展程序」，选择刚才的文件夹。
+4. 停用其他同类脚本或旧版扩展，避免重复拦截，然后刷新 [B 站开播设置页](https://link.bilibili.com/#/my-room/start-live)。
+5. 选择直播分区，点击「开始直播」，将页面返回的服务器地址和串流密钥填入 OBS。
 
-自 **2025年5月26日** 起，B站在网页端强制要求 **5000 粉丝以下的主播必须使用官方直播姬**，禁止使用 OBS 等第三方推流工具。
+已安装此分支时，可将新版文件覆盖到原目录，在扩展管理页点击「重新加载」，再刷新直播中心。如果移动了解压目录，需要重新选择目录加载。
 
-### 直播姬的严重缺陷
+## 1.1.0 修复内容
 
-1. **没有插件支持**
-   - OBS 做了这么多年的插件生态，直播姬通通不兼容
+原版只处理名称含 `startLive` 的请求。新版网页先调用 `FetchWebUpStreamAddr`，原版漏掉该接口，因而会出现「第三方开播卡片可见，点击后却失败」的情况。排查时服务器返回 `690001 系统维护仅支持直播姬开播`。
 
-2. **界面简陋，使用体验不好**
-   - 没有类似OBS那样的“工作室模式”
+本版采用上游兼容方案：
 
-3. **疑似本地审核二压**
-   - 曾经有主播控诉，自己没有开播，电脑屏幕捕捉出现违规内容会被自动审核并封禁直播间。
-   - 直播姬的“第三方推流”模式，本质是在电脑本地架设了一个流媒体服务器，然后转发给B站。约等于你的直播画面可以被直播姬的二次服务器“降画质，特调，输出多个画质，限制码率，锐化”但不对你进行任何显示。
+- 捕获网页请求中的房间 ID，将取地址请求转换为 `get_stream_by_roomId`，适配返回字段 `rtmp/stream_line` 为网页需要的 `addr/line`。
+- 将 `WebLiveCenterStartLive` 转换为带客户端参数和 MD5 签名的 `/room/v1/Room/startLive`。
+- 同时支持 XHR 和 fetch，保留服务器真实失败响应。
+- 直接在页面 MAIN 世界安装拦截器，修复网页脚本误用扩展后台 API 的异常；移除重复注入、无关第三方库/WebSocket 修改及请求体日志。
+- 清理旧版无效的自定义请求头规则，缩减扩展权限。
 
-4. **平台限制**
-   - **没有 macOS 版本**
-   - **没有 Linux 版本**
-   - 非 Windows 用户的开播自由被完全剥夺
+## 验证与使用边界
 
-> 求求你们，别折腾自己家主播了。——[白夜Tira](https://t.bilibili.com/847139701670281225)
+2026-11-10 在 macOS Chrome 中实测：已取得服务器地址与串流密钥；完成 B 站要求的本人人脸认证后，页面成功进入开播状态，随后结束测试直播。未进行 OBS 音视频推流测试。
 
-作为一个开放的直播平台，这种人为设置的门槛是不合理的。本插件也旨在帮助新人主播获得平等的直播权利。
+入口显示不代表服务器已经授予开播权限。实名认证、人脸验证等账号要求仍需本人完成；实际可用性以 B 站当前服务端响应为准。每次重新开播，请重新复制页面中的地址和串流密钥。
 
-## ✨ 功能原理
+本扩展只处理 B 站直播 API 的指定端点，不直接读取 Cookie，不记录或上传推流码；登录凭据由浏览器按页面请求正常携带。Chrome 为本次实测环境，其他 Chromium 浏览器尚未验证。
 
-- 🔧 **自动修改平台参数**：将开播时的 `platform` 参数从 `pc` 改为 `pc_link`，直接在网页端模拟直播姬客户端
-- 🔓 **绕过权限检查**：强制页面请求的第三方开播权限端点返回 `allow_live = true`，`fans_threshold = 0` 可以正常开播
-- 🚀 **零配置使用**：安装后自动生效，无需任何设置
+## 开发与打包
 
-## 📦 安装步骤
+没有 npm 依赖。测试需要 Node.js 20 或更高版本；打包需要 Python 3。
 
-### 1. 下载扩展
-
-从 [Releases](https://github.com/George-Bai-VDS/Bilibili-Stream-Unlocker/releases) （中国大陆用户可以使用 [我的CDN](https://vcos.vds.pub/git-opt/bilibili-live-extension.zip)）页面下载最新版本的 `bilibili-live-extension.zip` 文件。
-
-### 2. 解压文件
-
-将下载的 ZIP 文件解压到任意文件夹，例如：
-```
-C:\Extensions\bilibili-live-helper\
+```sh
+node --test tests/content.test.cjs
+node --check content.js
+node --check background.js
+python3 scripts/build_package.py
 ```
 
-### 3. 开启开发者模式
+测试覆盖 XHR/fetch 接口转换、响应字段、请求签名、凭据传递、服务端错误保留及无关请求透传。
 
-1. 打开 Chrome 浏览器
-2. 在地址栏输入 `chrome://extensions/` 并回车
-3. 在页面右上角找到「开发者模式」开关，将其打开
+打包脚本会生成 `dist/bilibili-live-extension-v1.1.0.zip` 和 `dist/SHA256SUMS`。ZIP 只包含扩展运行文件、图标、说明和许可证，不包含测试、Git 元数据、本地备份或调试记录。对相同源码重复打包会生成相同的校验值。
 
-### 4. 加载扩展
-
-1. 点击页面左上角的「加载已解压的扩展程序」按钮
-2. 选择刚才解压的文件夹
-3. 确认加载
-
-### 5. 验证安装
-
-安装成功后，执行以下步骤验证：
-
-1. 打开 [B站直播中心](https://link.bilibili.com/)
-2. 在「我的直播间-开播设置」中
-3. 如果看到「第三方软件开播」的卡片，说明插件已生效
-4. 现在你可以使用 OBS 等软件进行直播了！
-
-## 🔧 兼容性
-
-- ✅ Chrome 88+
-- ✅ Microsoft Edge
-- ✅ Brave Browser
-- ✅ 其他基于 Chromium 的浏览器
-
-## ⚠️ 注意事项
-
-1. **合规责任**：与原脚本一样，本插件没有符合直播合规性要求的遮挡功能，请自行做画面遮挡。
-2. **首次使用**：安装后需要刷新已打开的直播页面
-3. **更新扩展**：如有新版本，重复安装步骤即可覆盖更新
-4. **隐私安全**：本扩展仅在B站直播相关页面运行，不会收集任何个人信息，也不会上传任何你的信息给任何第三方服务。
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！如果你有任何改进建议或遇到问题，请：
-
-1. 先搜索是否已有相关 Issue
-2. 提供详细的问题描述和复现步骤
-3. 如可能，附上控制台截图
-
-## 📄 开源协议
-
-本项目基于 MIT 协议开源，详见 [LICENSE](LICENSE.txt) 文件。
-
-## 🙏 致谢
-
-- 感谢 [ProgramRipper](https://github.com/ProgramRipper) 的原始项目
-- 感谢所有为新人主播发声的朋友们
-
----
-
-如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！
+更新记录见 [CHANGELOG.md](CHANGELOG.md)。原作者及分支作者的 MIT 声明见 [LICENSE.txt](LICENSE.txt)。

@@ -1,513 +1,194 @@
-// ========== 1. 增强版 content.js ==========
-// 采用多层防护，确保百分百拦截请求和响应
+// MAIN world, document_start: install directly, without inline scripts or chrome.* APIs.
+// API compatibility based on ProgramRipper/BLiveWeb, src/index.user.ts (MIT),
+// commit eaa6433945ebc20dae3a2443b167ea37fdfeb99d.
+(() => {
+    'use strict';
+    if (location.hostname !== 'link.bilibili.com' || window.__bsuInstalled) return;
+    Object.defineProperty(window, '__bsuInstalled', { value: '1.1.0' });
 
-console.log('🎬 B站直播助手启动 - 终极拦截模式');
+    const API = 'https://api.live.bilibili.com';
+    const PERMISSION = '/xlive/app-blink/v1/live/GetWebLivePermission';
+    const ADDRESS = '/xlive/app-blink/v1/live/FetchWebUpStreamAddr';
+    const WEB_START = '/xlive/app-blink/v1/streaming/WebLiveCenterStartLive';
+    const START = '/room/v1/Room/startLive';
+    const nativeFetch = window.fetch;
+    const xhrPrototype = window.XMLHttpRequest.prototype;
+    const nativeOpen = xhrPrototype.open;
+    const nativeSend = xhrPrototype.send;
+    const nativeResponseText = Object.getOwnPropertyDescriptor(xhrPrototype, 'responseText');
+    const nativeResponse = Object.getOwnPropertyDescriptor(xhrPrototype, 'response');
+    const requests = new WeakMap();
+    let roomId = '';
 
-if (window.location.hostname.includes('link.bilibili.com')) {
-    // 1. 尽早注入拦截脚本
-    const script = document.createElement('script');
-    script.textContent = `
-        (function() {
-            console.log('🔧 B站直播终极拦截器已注入');
-            
-            // ===== 核心拦截逻辑 =====
-            const interceptConfig = {
-                targetUrls: ['startLive', 'start-live', 'start_live'],
-                permissionUrl: 'GetWebLivePermission',
-                targetPlatform: 'pc_link',
-                interceptCount: 0,
-                responseInterceptCount: 0
-            };
-            
-            // 深度对象修改函数
-            function deepModifyPlatform(obj) {
-                if (!obj || typeof obj !== 'object') return obj;
-                
-                // 递归遍历所有属性
-                for (let key in obj) {
-                    if (obj.hasOwnProperty(key)) {
-                        if (key === 'platform' && obj[key] !== 'pc_link') {
-                            console.log('🔄 修改platform:', obj[key], '->', 'pc_link');
-                            obj[key] = 'pc_link';
-                            interceptConfig.interceptCount++;
-                        } else if (typeof obj[key] === 'object') {
-                            deepModifyPlatform(obj[key]);
-                        }
-                    }
-                }
-                return obj;
+    // MD5 is required by the public legacy client API's request signature.
+    function md5(text) {
+        const source = new TextEncoder().encode(text);
+        const bytes = new Uint8Array(Math.ceil((source.length + 9) / 64) * 64);
+        bytes.set(source);
+        bytes[source.length] = 0x80;
+        const view = new DataView(bytes.buffer);
+        view.setUint32(bytes.length - 8, source.length * 8, true);
+        view.setUint32(bytes.length - 4, Math.floor(source.length / 0x20000000), true);
+        const shifts = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+        const hash = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+        for (let offset = 0; offset < bytes.length; offset += 64) {
+            let [a, b, c, d] = hash;
+            for (let i = 0; i < 64; i++) {
+                const round = i >>> 4;
+                const f = round === 0 ? (b & c) | (~b & d)
+                    : round === 1 ? (d & b) | (~d & c)
+                    : round === 2 ? b ^ c ^ d : c ^ (b | ~d);
+                const word = round === 0 ? i : round === 1 ? (5 * i + 1) % 16
+                    : round === 2 ? (3 * i + 5) % 16 : (7 * i) % 16;
+                const sum = (a + f + Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000)
+                    + view.getUint32(offset + word * 4, true)) | 0;
+                const shift = shifts[round * 4 + i % 4];
+                [a, b, c, d] = [d, (b + ((sum << shift) | (sum >>> (32 - shift)))) | 0, b, c];
             }
-            
-            // ===== 1. 最底层：代理构造函数 =====
-            // 拦截所有可能的HTTP请求构造函数
-            const originalXHR = window.XMLHttpRequest;
-            const originalFetch = window.fetch;
-            const originalRequest = window.Request;
-            const originalHeaders = window.Headers;
-            
-            // 代理 XMLHttpRequest
-            window.XMLHttpRequest = new Proxy(originalXHR, {
-                construct(target, args) {
-                    const xhr = new target(...args);
-                    
-                    // 保存原始方法
-                    const originalOpen = xhr.open;
-                    const originalSend = xhr.send;
-                    const originalSetRequestHeader = xhr.setRequestHeader;
-                    
-                    // 用于存储请求信息
-                    xhr._requestInfo = {};
-                    
-                    xhr.open = function(method, url, ...args) {
-                        xhr._requestInfo.method = method;
-                        xhr._requestInfo.url = url;
-                        return originalOpen.call(this, method, url, ...args);
-                    };
-                    
-                    xhr.setRequestHeader = function(name, value) {
-                        xhr._requestInfo.headers = xhr._requestInfo.headers || {};
-                        xhr._requestInfo.headers[name] = value;
-                        return originalSetRequestHeader.call(this, name, value);
-                    };
-                    
-                    xhr.send = function(data) {
-                        // 拦截POST请求
-                        if (xhr._requestInfo.method === 'POST' && xhr._requestInfo.url && 
-                            interceptConfig.targetUrls.some(u => xhr._requestInfo.url.includes(u))) {
-                            
-                            console.log('🎯 XHR拦截到开播请求');
-                            
-                            // 处理各种数据格式
-                            if (typeof data === 'string') {
-                                try {
-                                    // 尝试作为JSON解析
-                                    let jsonData = JSON.parse(data);
-                                    jsonData = deepModifyPlatform(jsonData);
-                                    data = JSON.stringify(jsonData);
-                                } catch (e) {
-                                    // 作为URL参数处理
-                                    const params = new URLSearchParams(data);
-                                    if (params.has('platform')) {
-                                        params.set('platform', 'pc_link');
-                                        data = params.toString();
-                                    }
-                                }
-                            } else if (data instanceof FormData) {
-                                if (data.has('platform')) {
-                                    data.set('platform', 'pc_link');
-                                }
-                            } else if (data && typeof data === 'object') {
-                                data = deepModifyPlatform(data);
-                            }
-                        }
-                        
-                        // 为响应拦截做准备
-                        if (xhr._requestInfo.url && xhr._requestInfo.url.includes(interceptConfig.permissionUrl)) {
-                            console.log('🔍 检测到权限请求:', xhr._requestInfo.url);
-                            
-                            // 监听响应
-                            const originalListener = xhr.onreadystatechange;
-                            xhr.onreadystatechange = function() {
-                                if (xhr.readyState === 4 && xhr.status === 200) {
-                                    try {
-                                        // 尝试解析并修改响应
-                                        let responseData = JSON.parse(xhr.responseText);
-                                        console.log('📥 原始权限响应:', responseData);
-                                        
-                                        if (responseData.data) {
-                                            responseData.data.allow_live = true;
-                                            responseData.data.fans_threshold = 0;
-                                            interceptConfig.responseInterceptCount++;
-                                            
-                                            // 重写响应
-                                            Object.defineProperty(xhr, 'responseText', {
-                                                value: JSON.stringify(responseData)
-                                            });
-                                            Object.defineProperty(xhr, 'response', {
-                                                value: JSON.stringify(responseData)
-                                            });
-                                            
-                                            console.log('✅ 权限响应已修改:', responseData);
-                                        }
-                                    } catch (e) {
-                                        console.error('❌ 修改响应失败:', e);
-                                    }
-                                }
-                                
-                                if (originalListener) {
-                                    originalListener.call(this);
-                                }
-                            };
-                        }
-                        
-                        return originalSend.call(this, data);
-                    };
-                    
-                    return xhr;
-                }
-            });
-            
-            // 代理 fetch - 包含响应拦截
-            window.fetch = new Proxy(originalFetch, {
-                apply(target, thisArg, args) {
-                    let [input, init = {}] = args;
-                    
-                    // 检查URL
-                    const url = typeof input === 'string' ? input : input.url;
-                    
-                    // 拦截POST请求
-                    if (init.method === 'POST' && interceptConfig.targetUrls.some(u => url.includes(u))) {
-                        console.log('🎯 Fetch拦截到开播请求');
-                        
-                        // 处理body
-                        if (init.body) {
-                            if (typeof init.body === 'string') {
-                                try {
-                                    let jsonData = JSON.parse(init.body);
-                                    jsonData = deepModifyPlatform(jsonData);
-                                    init.body = JSON.stringify(jsonData);
-                                } catch (e) {
-                                    const params = new URLSearchParams(init.body);
-                                    if (params.has('platform')) {
-                                        params.set('platform', 'pc_link');
-                                        init.body = params.toString();
-                                    }
-                                }
-                            } else if (init.body instanceof FormData) {
-                                if (init.body.has('platform')) {
-                                    init.body.set('platform', 'pc_link');
-                                }
-                            } else if (init.body instanceof URLSearchParams) {
-                                if (init.body.has('platform')) {
-                                    init.body.set('platform', 'pc_link');
-                                }
-                            }
-                        }
-                    }
-                    
-                    // 执行原始fetch并拦截响应
-                    const promise = target.apply(thisArg, [input, init]);
-                    
-                    // 如果是权限请求，拦截响应
-                    if (url.includes(interceptConfig.permissionUrl)) {
-                        console.log('🔍 Fetch检测到权限请求:', url);
-                        
-                        return promise.then(response => {
-                            // 克隆响应以便修改
-                            const clonedResponse = response.clone();
-                            
-                            return clonedResponse.json().then(data => {
-                                console.log('📥 原始权限响应:', data);
-                                
-                                if (data.data) {
-                                    data.data.allow_live = true;
-                                    data.data.fans_threshold = 0;
-                                    interceptConfig.responseInterceptCount++;
-                                    console.log('✅ 权限响应已修改:', data);
-                                }
-                                
-                                // 创建新的响应
-                                const modifiedResponse = new Response(JSON.stringify(data), {
-                                    status: response.status,
-                                    statusText: response.statusText,
-                                    headers: response.headers
-                                });
-                                
-                                // 复制原响应的属性
-                                Object.defineProperties(modifiedResponse, {
-                                    url: { value: response.url },
-                                    redirected: { value: response.redirected },
-                                    type: { value: response.type },
-                                    ok: { value: response.ok }
-                                });
-                                
-                                return modifiedResponse;
-                            }).catch(() => {
-                                // 如果不是JSON响应，返回原始响应
-                                return response;
-                            });
-                        });
-                    }
-                    
-                    return promise;
-                }
-            });
-            
-            // ===== 2. 拦截第三方库 =====
-            // 监控全局对象的变化
-            const libraryInterceptor = {
-                axios: false,
-                jquery: false
-            };
-            
-            // 使用 Object.defineProperty 监控库的加载
-            Object.defineProperty(window, 'axios', {
-                get() {
-                    return this._axios;
-                },
-                set(value) {
-                    console.log('🔍 检测到axios加载');
-                    this._axios = value;
-                    
-                    if (value && value.interceptors && !libraryInterceptor.axios) {
-                        libraryInterceptor.axios = true;
-                        
-                        // 添加请求拦截器
-                        value.interceptors.request.use(config => {
-                            if (config.method === 'post' && config.url && 
-                                interceptConfig.targetUrls.some(u => config.url.includes(u))) {
-                                console.log('🎯 Axios拦截到开播请求');
-                                config.data = deepModifyPlatform(config.data);
-                            }
-                            return config;
-                        });
-                        
-                        // 添加响应拦截器
-                        value.interceptors.response.use(response => {
-                            if (response.config.url && response.config.url.includes(interceptConfig.permissionUrl)) {
-                                console.log('🎯 Axios拦截到权限响应');
-                                if (response.data && response.data.data) {
-                                    response.data.data.allow_live = true;
-                                    response.data.data.fans_threshold = 0;
-                                    interceptConfig.responseInterceptCount++;
-                                }
-                            }
-                            return response;
-                        });
-                    }
-                }
-            });
-            
-            // jQuery拦截
-            Object.defineProperty(window, '$', {
-                get() {
-                    return this._$;
-                },
-                set(value) {
-                    console.log('🔍 检测到jQuery加载');
-                    this._$ = value;
-                    
-                    if (value && value.ajax && !libraryInterceptor.jquery) {
-                        libraryInterceptor.jquery = true;
-                        
-                        const originalAjax = value.ajax;
-                        value.ajax = function(options) {
-                            // 请求拦截
-                            if (options.type === 'POST' && options.url && 
-                                interceptConfig.targetUrls.some(u => options.url.includes(u))) {
-                                console.log('🎯 jQuery拦截到开播请求');
-                                
-                                if (typeof options.data === 'string') {
-                                    try {
-                                        let jsonData = JSON.parse(options.data);
-                                        jsonData = deepModifyPlatform(jsonData);
-                                        options.data = JSON.stringify(jsonData);
-                                    } catch (e) {
-                                        const params = new URLSearchParams(options.data);
-                                        if (params.has('platform')) {
-                                            params.set('platform', 'pc_link');
-                                            options.data = params.toString();
-                                        }
-                                    }
-                                } else if (options.data) {
-                                    options.data = deepModifyPlatform(options.data);
-                                }
-                            }
-                            
-                            // 响应拦截
-                            if (options.url && options.url.includes(interceptConfig.permissionUrl)) {
-                                const originalSuccess = options.success;
-                                options.success = function(data, textStatus, jqXHR) {
-                                    console.log('🎯 jQuery拦截到权限响应');
-                                    if (data && data.data) {
-                                        data.data.allow_live = true;
-                                        data.data.fans_threshold = 0;
-                                        interceptConfig.responseInterceptCount++;
-                                    }
-                                    if (originalSuccess) {
-                                        originalSuccess.call(this, data, textStatus, jqXHR);
-                                    }
-                                };
-                            }
-                            
-                            return originalAjax.call(this, options);
-                        };
-                    }
-                }
-            });
-            
-            // ===== 3. WebSocket拦截（如果B站使用WebSocket） =====
-            const originalWebSocket = window.WebSocket;
-            window.WebSocket = new Proxy(originalWebSocket, {
-                construct(target, args) {
-                    const ws = new target(...args);
-                    
-                    // 保存原始send方法
-                    const originalSend = ws.send;
-                    
-                    ws.send = function(data) {
-                        // 检查是否是开播相关的WebSocket消息
-                        if (typeof data === 'string' && data.includes('platform')) {
-                            try {
-                                let jsonData = JSON.parse(data);
-                                jsonData = deepModifyPlatform(jsonData);
-                                data = JSON.stringify(jsonData);
-                                console.log('🎯 WebSocket拦截到platform参数');
-                            } catch (e) {}
-                        }
-                        return originalSend.call(this, data);
-                    };
-                    
-                    return ws;
-                }
-            });
-            
-            // ===== 4. MutationObserver监控DOM变化 =====
-            // 监控动态加载的脚本和iframe
-            const observer = new MutationObserver(mutations => {
-                mutations.forEach(mutation => {
-                    mutation.addedNodes.forEach(node => {
-                        if (node.tagName === 'SCRIPT') {
-                            // 监控新加载的脚本
-                            console.log('🔍 检测到新脚本加载:', node.src || '内联脚本');
-                        } else if (node.tagName === 'IFRAME') {
-                            // 尝试注入到iframe中
-                            try {
-                                if (node.contentWindow) {
-                                    injectToFrame(node.contentWindow);
-                                }
-                            } catch (e) {
-                                console.log('⚠️ 无法访问iframe:', e);
-                            }
-                        }
-                    });
-                });
-            });
-            
-            observer.observe(document.documentElement, {
-                childList: true,
-                subtree: true
-            });
-            
-            // ===== 5. 定时检查和修复 =====
-            setInterval(() => {
-                // 重新检查并修复可能被覆盖的方法
-                if (window.XMLHttpRequest !== XMLHttpRequest) {
-                    console.log('⚠️ XMLHttpRequest被覆盖，重新注入');
-                    window.XMLHttpRequest = XMLHttpRequest;
-                }
-                
-                if (window.fetch !== fetch) {
-                    console.log('⚠️ fetch被覆盖，重新注入');
-                    window.fetch = fetch;
-                }
-                
-                // 检查第三方库
-                if (window.axios && !libraryInterceptor.axios) {
-                    console.log('🔍 发现新的axios实例');
-                    // 触发setter重新拦截
-                    window.axios = window.axios;
-                }
-            }, 2000);
-            
-            // ===== 6. 状态显示UI =====
-            function createStatusUI() {
-                const ui = document.createElement('div');
-                
-                // 更新计数器
-                setInterval(() => {
-                    const counter = document.getElementById('intercept-count');
-                    const responseCounter = document.getElementById('response-intercept-count');
-                    if (counter) {
-                        counter.textContent = interceptConfig.interceptCount;
-                    }
-                    if (responseCounter) {
-                        responseCounter.textContent = interceptConfig.responseInterceptCount;
-                    }
-                }, 1000);
-            }
-            
-            // 等待DOM加载完成
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', createStatusUI);
-            } else {
-                createStatusUI();
-            }
-            
-            console.log('✅ 终极拦截器初始化完成 - 支持响应拦截');
-        })();
-    `;
-    
-    // 确保最早执行
-    if (document.documentElement) {
-        document.documentElement.appendChild(script);
-    } else {
-        document.addEventListener('DOMContentLoaded', () => {
-            document.documentElement.appendChild(script);
-        });
-    }
-    script.remove();
-}
-
-// ========== 2. 增强版 background.js (Service Worker) ==========
-// 使用 declarativeNetRequest API 进行网络层拦截
-
-console.log('🚀 B站直播助手 Service Worker 启动');
-
-// 动态规则ID
-const RULE_ID_REQUEST = 1;
-const RULE_ID_RESPONSE = 2;
-
-// 设置拦截规则
-chrome.runtime.onInstalled.addListener(() => {
-    // 使用 declarativeNetRequest 设置规则
-    chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: [RULE_ID_REQUEST, RULE_ID_RESPONSE],
-        addRules: [
-            {
-                id: RULE_ID_REQUEST,
-                priority: 1,
-                action: {
-                    type: 'modifyHeaders',
-                    requestHeaders: [{
-                        header: 'X-Platform-Override',
-                        operation: 'set',
-                        value: 'pc_link'
-                    }]
-                },
-                condition: {
-                    urlFilter: '*://api.live.bilibili.com/*startLive*',
-                    resourceTypes: ['xmlhttprequest', 'other']
-                }
-            }
-        ]
-    });
-    
-    console.log('✅ 网络拦截规则已设置');
-});
-
-// 监听网络请求（用于日志记录和响应修改）
-chrome.webRequest.onBeforeRequest.addListener(
-    (details) => {
-        if (details.method === 'POST' && details.url.includes('startLive')) {
-            console.log('🎯 检测到开播请求:', details);
-            
-            // 尝试解析请求体
-            if (details.requestBody) {
-                console.log('📦 请求体:', details.requestBody);
-            }
+            [a, b, c, d].forEach((value, i) => { hash[i] = (hash[i] + value) | 0; });
         }
-    },
-    {
-        urls: ['*://api.live.bilibili.com/*'],
-        types: ['xmlhttprequest', 'other']
-    },
-    ['requestBody']
-);
-
-// 添加消息监听器，用于和content script通信
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.type === 'interceptLog') {
-        console.log('📊 拦截统计:', request.data);
+        return hash.map(word => [0, 8, 16, 24].map(shift =>
+            ((word >>> shift) & 255).toString(16).padStart(2, '0')).join('')).join('');
     }
-});
+
+    function classify(input, method) {
+        const url = new URL(input, location.href);
+        if (url.origin !== API) return null;
+        method = method.toUpperCase();
+        if (method === 'GET' && url.pathname === '/room/v1/Area/getMyChooseArea') {
+            const id = url.searchParams.get('roomid');
+            if (/^\d+$/.test(id || '')) roomId = id;
+        }
+        if (method === 'GET' && url.pathname === PERMISSION) return { kind: 'permission', url };
+        if (method !== 'POST') return null;
+        if (url.pathname === ADDRESS && roomId) {
+            return { kind: 'address', url: new URL(
+                API + '/live_stream/v1/StreamList/get_stream_by_roomId?room_id=' + roomId) };
+        }
+        if (url.pathname === WEB_START || url.pathname === START) return { kind: 'start', url };
+        return null;
+    }
+
+    function startBody(query, body) {
+        const params = new URLSearchParams(query);
+        const supplied = body instanceof FormData ? body.entries() : new URLSearchParams(body || '');
+        for (const [key, value] of supplied) params.set(key, value);
+        const signed = new URLSearchParams({
+            access_key: '', appkey: 'aae92bc66f3edfab',
+            area_v2: params.get('area_v2') || '', build: '9343',
+            csrf: params.get('csrf') || params.get('csrf_token') || '',
+            csrf_token: params.get('csrf_token') || params.get('csrf') || '',
+            platform: 'pc_link', room_id: params.get('room_id') || roomId,
+            ts: Math.floor(Date.now() / 1000).toString()
+        });
+        signed.sort();
+        signed.set('sign', md5(signed.toString() + 'af125a0d5279fd576c1b4418a3e8276d'));
+        return signed;
+    }
+
+    function transform(data, kind) {
+        if (!data || data.code !== 0 || !data.data || typeof data.data !== 'object') return data;
+        if (kind === 'permission') {
+            return { ...data, data: { ...data.data, allow_live: true, fans_threshold: 0 } };
+        }
+        if (kind === 'address' && data.data.rtmp) {
+            const { rtmp, stream_line, ...rest } = data.data;
+            return { ...data, data: { ...rest, addr: rtmp, line: stream_line } };
+        }
+        return data;
+    }
+
+    function transformText(raw, info) {
+        if (!info || info.kind === 'start') return raw;
+        if (info.raw === raw) return info.mapped;
+        try {
+            const mapped = JSON.stringify(transform(JSON.parse(raw), info.kind));
+            info.raw = raw;
+            info.mapped = mapped;
+            return mapped;
+        } catch { return raw; }
+    }
+
+    xhrPrototype.open = function (method, url, ...args) {
+        const info = classify(url, method);
+        const result = nativeOpen.call(this, info?.kind === 'address' ? 'GET' : method,
+            info?.kind === 'address' ? info.url.href : info?.kind === 'start' ? API + START : url, ...args);
+        requests.set(this, info);
+        return result;
+    };
+    xhrPrototype.send = function (body) {
+        const info = requests.get(this);
+        if (info?.kind === 'address') body = null;
+        if (info?.kind === 'start') {
+            body = startBody(info.url.searchParams, body).toString();
+            this.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+        }
+        return nativeSend.call(this, body);
+    };
+    Object.defineProperty(xhrPrototype, 'responseText', {
+        ...nativeResponseText,
+        get() { return transformText(nativeResponseText.get.call(this), requests.get(this)); }
+    });
+    Object.defineProperty(xhrPrototype, 'response', {
+        ...nativeResponse,
+        get() {
+            const raw = nativeResponse.get.call(this);
+            const info = requests.get(this);
+            if (!info) return raw;
+            if (this.responseType === 'json') {
+                if (info.jsonRaw !== raw) {
+                    info.jsonRaw = raw;
+                    info.jsonMapped = transform(raw, info.kind);
+                }
+                return info.jsonMapped;
+            }
+            return typeof raw === 'string' ? transformText(raw, info) : raw;
+        }
+    });
+
+    function mappedResponse(original, text) {
+        const headers = new Headers(original.headers);
+        headers.delete('content-length');
+        headers.delete('content-encoding');
+        const result = new Response(text, { status: original.status, statusText: original.statusText, headers });
+        for (const key of ['url', 'redirected', 'type']) {
+            Object.defineProperty(result, key, { value: original[key] });
+        }
+        const clone = result.clone.bind(result);
+        result.clone = () => mappedResponse(clone(), text);
+        return result;
+    }
+
+    window.fetch = async function (input, init) {
+        const inputUrl = input instanceof Request ? input.url : String(input);
+        const method = init?.method || (input instanceof Request ? input.method : 'GET');
+        const info = classify(inputUrl, method);
+        if (!info) return nativeFetch.call(this, input, init);
+        let request = input instanceof Request
+            ? new Request(input, init) : new Request(new URL(inputUrl, location.href), init);
+        if (info.kind === 'address' || info.kind === 'start') {
+            const headers = new Headers(request.headers);
+            const supplied = info.kind === 'start'
+                ? request.headers.get('content-type')?.startsWith('multipart/form-data')
+                    ? await request.formData() : await request.text()
+                : null;
+            const body = info.kind === 'start' ? startBody(info.url.searchParams, supplied) : null;
+            headers.delete('content-type');
+            request = new Request(info.kind === 'address' ? info.url : API + START, {
+                method: info.kind === 'address' ? 'GET' : 'POST', headers, body,
+                credentials: request.credentials, mode: request.mode, cache: request.cache,
+                redirect: request.redirect, referrer: request.referrer,
+                referrerPolicy: request.referrerPolicy, signal: request.signal,
+                integrity: request.integrity, keepalive: request.keepalive
+            });
+        }
+        const response = await nativeFetch.call(this, request);
+        if (info.kind === 'start' || !response.ok) return response;
+        try {
+            const original = await response.clone().json();
+            const mapped = transform(original, info.kind);
+            return mapped === original ? response : mappedResponse(response, JSON.stringify(mapped));
+        } catch { return response; }
+    };
+    console.info('[还我推流权] 1.1.0 已加载（新版推流地址 / 开播接口兼容）');
+})();
